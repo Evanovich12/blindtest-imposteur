@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Blindtest Imposteur — Téléphone</title>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+  :root{
+    --ink:#17111f; --panel:#231a2e; --panel2:#2c2038; --line:#3a2c49;
+    --magenta:#ff3d7f; --gold:#ffc247; --teal:#34e0c4; --cloud:#f3ecf8; --muted:#9a8cab;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% -10%,#241733,var(--ink) 60%);
+       color:var(--cloud);font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
+  .wrap{max-width:460px;margin:0 auto;padding:26px 18px 60px}
+  .eyebrow{font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  h1{font-size:28px;font-weight:900;letter-spacing:-.02em;margin:8px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px}
+  input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:11px;
+        padding:14px;color:var(--cloud);font-size:16px;outline:none;margin-bottom:10px}
+  input::placeholder{color:var(--muted)}
+  .btn{width:100%;border:none;border-radius:12px;padding:15px;font-weight:800;font-size:16px;cursor:pointer;color:#1a1020;background:var(--magenta)}
+  .btn:disabled{opacity:.45}
+  .btn.gold{background:var(--gold)}
+  .btn.ghost{background:var(--panel2);color:var(--cloud);border:1px solid var(--line)}
+  .btn.teal{background:var(--teal)}
+  .muted{color:var(--muted)} .center{text-align:center}
+  .av{border-radius:12px;display:grid;place-items:center;font-weight:900;color:#1a1020}
+  .ok{color:var(--teal)}
+  .toast{border-radius:10px;padding:10px 14px;font-size:14px;margin-top:8px}
+  .found-bar{display:flex;gap:8px;margin-bottom:14px}
+  .found-chip{flex:1;border-radius:10px;padding:10px;text-align:center;font-weight:700;font-size:14px;border:1.5px solid var(--line);background:var(--panel2);color:var(--muted)}
+  .found-chip.hit{border-color:var(--teal);color:var(--teal);background:rgba(52,224,196,.1)}
+  .pts-flash{font-size:22px;font-weight:900;color:var(--gold);text-align:center;margin:6px 0}
+  .suspect-btn{width:100%;background:var(--panel2);border:1.5px solid var(--line);border-radius:14px;padding:14px 16px;
+               color:var(--cloud);font-weight:700;font-size:16px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:12px;margin-bottom:8px}
+  .suspect-btn.selected{border-color:var(--magenta);background:rgba(255,61,127,.12);color:var(--cloud)}
+  .suspect-btn:disabled{opacity:.35;cursor:not-allowed}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<script>
+const socket = io();
+const COLORS = ["#ff3d7f","#ffc247","#34e0c4","#7c8cff","#ff8a3d","#c47cff","#3ddc97","#ff5d5d"];
+const app = document.getElementById("app");
+const params = new URLSearchParams(location.search);
+let myPid = null, myName = "", voted = false;
+let titleFound = false, artistFound = false;
+let currentScore = 0;
+
+const esc = (s)=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const av = (name,color,size)=>`<div class="av" style="width:${size}px;height:${size}px;background:${color};font-size:${size*0.42}px">${(name||"?").trim().charAt(0).toUpperCase()}</div>`;
+
+/* ----------------------------- REJOINDRE ----------------------------- */
+function renderJoin(err){
+  app.innerHTML=`
+    <div class="center"><div class="eyebrow" style="color:var(--magenta)">Blindtest · imposteur</div>
+    <h1>Rejoindre la partie</h1></div>
+    <div class="card" style="margin-top:14px">
+      <input id="name" placeholder="Ton prénom" maxlength="20" value="${esc(myName)}">
+      <input id="code" placeholder="Code du salon (4 lettres)" maxlength="4"
+             style="text-transform:uppercase;letter-spacing:.2em;font-family:ui-monospace,monospace"
+             value="${esc(params.get("room")||"")}">
+      ${err?`<div class="toast" style="color:var(--magenta);background:rgba(255,61,127,.1)">${esc(err)}</div>`:""}
+      <button class="btn" id="go" style="margin-top:8px">Entrer</button>
+    </div>`;
+  document.getElementById("go").onclick=()=>{
+    myName=document.getElementById("name").value.trim();
+    const code=document.getElementById("code").value.trim().toUpperCase();
+    if(!myName) return renderJoin("Mets ton prénom.");
+    if(code.length<4) return renderJoin("Le code fait 4 lettres.");
+    socket.emit("player:join",{code,name:myName},(r)=>{
+      if(!r.ok) return renderJoin(r.error);
+      myPid=r.pid;
+      if(r.phase==="round") renderGuess();
+      else renderSubmit();
+    });
+  };
+}
+
+/* ----------------------------- SOUMETTRE SA PLAYLIST ----------------------------- */
+function renderSubmit(done){
+  app.innerHTML=`
+    <div class="center"><div class="eyebrow" style="color:var(--gold)">Étape secrète</div>
+    <h1>Ta playlist</h1></div>
+    <div class="card" style="margin-top:14px">
+      ${done?`
+        <div class="center" style="padding:8px 0">
+          <div style="font-size:40px">✅</div>
+          <div style="font-weight:800;font-size:18px;margin-top:6px">Playlist enregistrée&nbsp;!</div>
+          <div class="muted" style="margin-top:6px">${done} morceaux prêts. Garde le secret 🤫<br>Attends que l'hôte lance la partie.</div>
+        </div>
+        <button class="btn ghost" id="again" style="margin-top:14px">Changer de playlist</button>
+      `:`
+        <p class="muted" style="margin-top:0">Personne d'autre ne verra ta playlist — c'est ça, le piège 👻</p>
+        <p class="muted" style="font-size:13px;margin-top:0">Colle un lien <strong>Spotify</strong> ou <strong>Deezer</strong> — aucune connexion requise.</p>
+        <input id="urlInput" placeholder="https://open.spotify.com/playlist/… ou deezer.com/playlist/…">
+        <button class="btn gold" id="sendBtn">Envoyer ma playlist</button>
+        <div id="status" style="margin-top:8px"></div>
+      `}`;
+  if(done){ document.getElementById("again").onclick=()=>renderSubmit(); return; }
+  const status=document.getElementById("status");
+  document.getElementById("sendBtn").onclick=()=>{
+    const url=document.getElementById("urlInput").value.trim();
+    if(!url) return;
+    document.getElementById("sendBtn").disabled=true;
+    const isDeezer=url.includes("deezer.com");
+    status.innerHTML=`<div class="toast" style="background:var(--panel2)">⏳ Import ${isDeezer?"Deezer":"Spotify"} en cours… (peut prendre 10-20s)</div>`;
+    socket.emit("player:submitPlaylist",{url},(r)=>{
+      document.getElementById("sendBtn").disabled=false;
+      if(!r.ok){ status.innerHTML=`<div class="toast" style="color:var(--magenta);background:rgba(255,61,127,.1)">${esc(r.error)}</div>`; return; }
+      renderSubmit(r.count);
+    });
+  };
+}
+
+/* ----------------------------- DEVINER ----------------------------- */
+function renderGuess(){
+  titleFound=false; artistFound=false;
+  app.innerHTML=`
+    <div class="center"><div class="eyebrow" style="color:var(--magenta)">À l'écoute</div>
+    <h1>Devine&nbsp;!</h1></div>
+    <div class="card" style="margin-top:14px">
+      <div class="found-bar">
+        <div class="found-chip ${titleFound?"hit":""}" id="chipTitle">🎵 Titre</div>
+        <div class="found-chip ${artistFound?"hit":""}" id="chipArtist">🎤 Artiste</div>
+      </div>
+      <input id="g" placeholder="Titre ou artiste…" autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="btn" id="send">Proposer</button>
+      <div id="feedback"></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="eyebrow" style="color:var(--gold)">Ton score</div>
+      <div id="myScore" style="font-size:28px;font-weight:900;color:var(--gold);margin-top:6px;font-family:ui-monospace,monospace">${currentScore} pts</div>
+    </div>`;
+
+  const g=document.getElementById("g"), feedback=document.getElementById("feedback");
+  const fire=()=>{
+    const t=g.value.trim(); if(!t) return;
+    socket.emit("player:guess",{text:t});
+    g.value="";
+  };
+  document.getElementById("send").onclick=fire;
+  g.addEventListener("keydown",e=>{ if(e.key==="Enter") fire(); });
+}
+
+function updateFoundChips(){
+  const ct=document.getElementById("chipTitle"), ca=document.getElementById("chipArtist");
+  if(ct) ct.className="found-chip"+(titleFound?" hit":"");
+  if(ca) ca.className="found-chip"+(artistFound?" hit":"");
+}
+
+/* ----------------------------- VOTER ----------------------------- */
+function renderVote(suspects){
+  voted=false;
+  let selectedId=null;
+  app.innerHTML=`
+    <div class="center"><div style="font-size:40px">👻</div>
+    <div class="eyebrow" style="color:var(--magenta)">Vote secret</div>
+    <h1>À qui est cette playlist&nbsp;?</h1></div>
+    <div class="card" style="margin-top:14px">
+      <div id="suspectList">
+        ${suspects.map((s,i)=>`
+          <button class="suspect-btn" data-id="${esc(s.id)}" ${s.id===myPid?"disabled":""}>
+            ${av(s.name,COLORS[i%COLORS.length],38)}
+            <span>${esc(s.name)}</span>
+            ${s.id===myPid?`<span class="muted" style="font-size:12px;margin-left:auto">(toi)</span>`:""}
+          </button>`).join("")}
+      </div>
+      <button class="btn teal" id="confirmVote" disabled style="margin-top:6px">Valider mon vote</button>
+    </div>`;
+
+  document.querySelectorAll(".suspect-btn:not([disabled])").forEach(b=>{
+    b.onclick=()=>{
+      if(voted) return;
+      document.querySelectorAll(".suspect-btn").forEach(x=>x.classList.remove("selected"));
+      b.classList.add("selected");
+      selectedId=b.dataset.id;
+      document.getElementById("confirmVote").disabled=false;
+    };
+  });
+  document.getElementById("confirmVote").onclick=()=>{
+    if(!selectedId||voted) return;
+    voted=true;
+    socket.emit("player:vote",{suspectId:selectedId});
+    app.innerHTML=`<div class="card center" style="margin-top:80px;padding:48px 24px">
+      <div style="font-size:44px">🗳️</div><h1 style="font-size:24px">Vote enregistré</h1>
+      <p class="muted">On attend les autres et la révélation sur l'écran principal…</p></div>`;
+  };
+}
+
+/* ----------------------------- REVELATION / FIN ----------------------------- */
+function renderReveal(ownerName){
+  app.innerHTML=`<div class="card center" style="margin-top:70px;padding:46px 24px">
+    <div class="eyebrow" style="color:var(--gold)">L'imposteur était</div>
+    <h1 style="font-size:32px;margin:10px 0">${esc(ownerName)}</h1>
+    <p class="muted">Regarde le débat sur l'écran principal 🍿</p></div>`;
+}
+function renderDone(sb){
+  const w=sb[0]||{name:"—",score:0};
+  app.innerHTML=`<div class="card center" style="margin-top:60px;padding:46px 24px">
+    <div style="font-size:48px">👑</div><div class="eyebrow" style="color:var(--gold)">Vainqueur</div>
+    <h1 style="font-size:30px;margin:10px 0">${esc(w.name)}</h1>
+    <div style="color:var(--gold);font-family:ui-monospace,monospace">${w.score} points</div>
+    <div class="muted" style="margin-top:16px">Ton score : <b style="color:var(--cloud)">${currentScore} pts</b></div></div>`;
+}
+
+/* ----------------------------- EVENEMENTS ----------------------------- */
+socket.on("phase",(d)=>{ if(d.phase==="round"){ currentScore=0; renderGuess(); } });
+
+socket.on("track:start",()=>{
+  titleFound=false; artistFound=false;
+  renderGuess();
+});
+
+socket.on("track:reveal",(t)=>{
+  titleFound=false; artistFound=false;
+  const artwork=t.artwork?`<img src="${esc(t.artwork)}" alt="" style="width:120px;height:120px;border-radius:14px;object-fit:cover;margin-bottom:12px">`:"🎵";
+  app.innerHTML=`
+    <div class="center"><div class="eyebrow" style="color:var(--gold)">C'était…</div></div>
+    <div class="card center" style="margin-top:14px;padding:28px 20px">
+      <div style="font-size:${t.artwork?"":"48px"}">${artwork}</div>
+      <div style="font-size:22px;font-weight:900;margin-top:${t.artwork?"0":"8px"}">${esc(t.title)}</div>
+      <div style="color:var(--gold);font-size:16px;margin-top:4px">${esc(t.artist)}</div>
+      ${titleFound&&artistFound?`<div style="color:var(--teal);font-weight:700;margin-top:12px">🎯 Tu as tout trouvé !</div>`
+        :titleFound?`<div style="color:var(--gold);font-weight:700;margin-top:12px">🎵 Tu as trouvé le titre</div>`
+        :artistFound?`<div style="color:var(--magenta);font-weight:700;margin-top:12px">🎤 Tu as trouvé l'artiste</div>`
+        :`<div class="muted" style="margin-top:12px">Pas trouvé cette fois…</div>`}
+      <div class="muted" style="font-size:13px;margin-top:14px">Prochain morceau dans quelques secondes…</div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="eyebrow" style="color:var(--gold)">Ton score</div>
+      <div style="font-size:28px;font-weight:900;color:var(--gold);margin-top:6px;font-family:ui-monospace,monospace">${currentScore} pts</div>
+    </div>`;
+});
+
+socket.on("guess:result",(r)=>{
+  titleFound=r.titleFound; artistFound=r.artistFound;
+  currentScore=r.score;
+  updateFoundChips();
+  const scoreEl=document.getElementById("myScore");
+  if(scoreEl) scoreEl.textContent=r.score+" pts";
+  const fb=document.getElementById("feedback"); if(!fb) return;
+  let msg="", color="var(--teal)";
+  if(r.titleHit && r.artistHit){ msg=`🎉 Titre + Artiste ! <span style="color:var(--gold)">+${r.points} pts</span>`; color="var(--teal)"; }
+  else if(r.titleHit){ msg=`🎵 Titre trouvé ! <span style="color:var(--gold)">+${r.points} pts</span>`; }
+  else if(r.artistHit){ msg=`🎤 Artiste trouvé ! <span style="color:var(--gold)">+${r.points} pts</span>`; }
+  fb.innerHTML=`<div class="toast" style="background:rgba(52,224,196,.12);color:${color};font-weight:700">${msg}</div>`;
+  setTimeout(()=>{ if(fb) fb.innerHTML=""; },2500);
+});
+
+socket.on("vote:start",(d)=>renderVote(d.suspects));
+socket.on("reveal",(d)=>renderReveal(d.ownerName));
+socket.on("done",(sb)=>renderDone(sb));
+socket.on("scoreboard",(sb)=>{
+  const p=sb.find(x=>x.id===myPid);
+  if(p){ currentScore=p.score; const el=document.getElementById("myScore"); if(el) el.textContent=p.score+" pts"; }
+});
+socket.on("roomClosed",()=>{
+  app.innerHTML=`<div class="card center" style="margin-top:80px;padding:46px 24px">
+    <h1 style="font-size:24px">Partie terminée</h1><p class="muted">L'hôte a fermé le salon.</p></div>`;
+});
+
+renderJoin();
+</script>
+</body>
+</html>
