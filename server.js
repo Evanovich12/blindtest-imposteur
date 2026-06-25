@@ -53,18 +53,22 @@ function parsePlaylistId(url) {
 
 async function fetchPlaylistTracks(id, token) {
   const out = [];
-  let url =
-    `https://api.spotify.com/v1/playlists/${id}/tracks` +
-    `?fields=items(track(name,artists(name))),next&limit=50`;
+  let url = `https://api.spotify.com/v1/playlists/${id}/tracks?limit=50`;
   while (url && out.length < 50) {
     const r = await fetch(url, { headers: { Authorization: "Bearer " + token } });
     if (r.status === 404)
       throw new Error("Playlist introuvable. Astuce : les playlists editoriales de Spotify (Top 50, Discover Weekly...) ne sont pas lisibles. Utilise une playlist perso, et mets-la en public.");
-    if (!r.ok) throw new Error("Playlist illisible (privee ou supprimee ?). Mets-la en public.");
+    if (r.status === 403)
+      throw new Error("Acces refuse par Spotify (playlist privee ?). Va dans Spotify → ta playlist → les trois points → Rendre publique, puis reessaie.");
+    if (!r.ok) {
+      let detail = "";
+      try { const body = await r.json(); detail = body.error?.message || ""; } catch (_) {}
+      throw new Error(`Erreur Spotify ${r.status}${detail ? " : " + detail : ""}. Verifie que la playlist est publique.`);
+    }
     const d = await r.json();
     for (const it of d.items || []) {
       const t = it.track;
-      if (!t) continue;
+      if (!t || t.type !== "track") continue;
       out.push({ name: t.name, artist: (t.artists || []).map((a) => a.name).join(", ") });
     }
     url = d.next;
@@ -113,6 +117,29 @@ async function importPlaylist(url) {
     await new Promise((r) => setTimeout(r, 120));
   }
   if (!tracks.length) throw new Error("Aucun extrait audio trouve pour cette playlist via iTunes.");
+  return tracks;
+}
+
+/* ============================== BOT ============================== */
+const BOT_SONGS = [
+  "Bohemian Rhapsody Queen", "Blinding Lights The Weeknd", "Shape of You Ed Sheeran",
+  "Despacito Luis Fonsi", "Happy Pharrell Williams", "Uptown Funk Mark Ronson Bruno Mars",
+  "Rolling in the Deep Adele", "Mr Brightside The Killers", "Somebody That I Used To Know Gotye",
+  "Take On Me A-ha", "Africa Toto", "Sweet Child O Mine Guns N Roses",
+  "Pumped Up Kicks Foster the People", "Moves Like Jagger Maroon 5", "Call Me Maybe Carly Rae Jepsen",
+  "Girls Just Want to Have Fun Cyndi Lauper", "Wake Me Up Avicii", "Titanium David Guetta",
+  "Lean On Major Lazer", "Cheap Thrills Sia",
+];
+
+async function buildBotPlaylist() {
+  const shuffled = [...BOT_SONGS].sort(() => Math.random() - 0.5);
+  const tracks = [];
+  for (const term of shuffled) {
+    if (tracks.length >= 10) break;
+    const p = await itunesPreview(term);
+    if (p) tracks.push(p);
+    await new Promise((r) => setTimeout(r, 120));
+  }
   return tracks;
 }
 
@@ -222,6 +249,25 @@ io.on("connection", (socket) => {
       room.phase = "done";
       io.to(roomCode).emit("done", scoreboard(room));
       io.to(room.hostId).emit("host:done", scoreboard(room));
+    }
+  });
+
+  socket.on("host:addBot", async (_, ack) => {
+    const room = rooms[roomCode];
+    if (!room) return ack && ack({ ok: false, error: "Salon introuvable." });
+    if (room.phase !== "lobby") return ack && ack({ ok: false, error: "La partie a deja commence." });
+    try {
+      const tracks = await buildBotPlaylist();
+      if (!tracks.length) return ack && ack({ ok: false, error: "Impossible de charger la playlist du bot (iTunes indisponible ?)." });
+      const botId = "bot" + Math.random().toString(36).slice(2, 6);
+      const botNames = ["🤖 Groover", "🤖 Deezer Bot", "🤖 RoboDJ", "🤖 MusiBot"];
+      const botName = botNames[Math.floor(Math.random() * botNames.length)];
+      room.players[botId] = { id: botId, name: botName, socketId: null, score: 0, connected: true, hasPlaylist: true };
+      room.playlists[botId] = { tracks };
+      ack && ack({ ok: true, name: botName, count: tracks.length });
+      io.to(room.hostId).emit("lobby", roster(room));
+    } catch (e) {
+      ack && ack({ ok: false, error: e.message });
     }
   });
 
