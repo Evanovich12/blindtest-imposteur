@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Blindtest Imposteur — Écran principal</title>
+<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js"></script>
+<style>
+  :root{
+    --ink:#17111f; --panel:#231a2e; --panel2:#2c2038; --line:#3a2c49;
+    --magenta:#ff3d7f; --gold:#ffc247; --teal:#34e0c4; --cloud:#f3ecf8; --muted:#9a8cab;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% -10%,#241733,var(--ink) 60%);
+       color:var(--cloud);font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
+  .wrap{max-width:1060px;margin:0 auto;padding:28px 22px 70px}
+  .eyebrow{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  h1{font-size:38px;font-weight:900;letter-spacing:-.03em;margin:8px 0 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:none;border-radius:12px;
+       padding:13px 20px;font-weight:800;font-size:15px;cursor:pointer;color:#1a1020;background:var(--magenta)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.ghost{background:var(--panel2);color:var(--cloud);border:1px solid var(--line)}
+  .btn.gold{background:var(--gold)}
+  .row{display:flex;align-items:center;gap:10px}
+  .av{border-radius:11px;display:grid;place-items:center;font-weight:900;color:#1a1020;flex:none}
+  .code{font-family:ui-monospace,monospace;font-size:54px;font-weight:800;letter-spacing:.12em;color:var(--gold)}
+  .muted{color:var(--muted)}
+  .pill{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:13px}
+  .art{width:220px;height:220px;border-radius:18px;margin:0 auto;display:grid;place-items:center;overflow:hidden;
+       background:radial-gradient(circle at 50% 35%,var(--panel2),var(--panel));font-size:80px}
+  .art img{width:100%;height:100%;object-fit:cover}
+  .bar-wrap{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:14px 0}
+  .bar-inner{display:block;height:100%;width:100%;background:var(--magenta);transform-origin:left;transition:transform .25s linear}
+  .countdown{font-size:52px;font-weight:900;font-family:ui-monospace,monospace;color:var(--gold);text-align:center;line-height:1}
+  .two-col{display:grid;grid-template-columns:1.4fr .9fr;gap:18px}
+  .srow{display:flex;align-items:center;gap:9px;padding:5px 0}
+  .srow b{margin-left:auto;font-family:ui-monospace,monospace;color:var(--gold);font-size:16px}
+  .status-dot{width:10px;height:10px;border-radius:50%;flex:none}
+  .dot-none{background:var(--line)}
+  .dot-partial{background:var(--gold)}
+  .dot-both{background:var(--teal)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row" style="justify-content:space-between;margin-bottom:18px">
+    <div><div class="eyebrow" style="color:var(--magenta)">Blindtest · imposteur</div><h1>Écran principal</h1></div>
+    <div class="row" style="gap:10px">
+      <div class="pill" id="roundTag">En attente</div>
+      <div class="row" style="gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:6px 12px">
+        <span style="font-size:14px" id="volIcon">🔊</span>
+        <input type="range" id="volSlider" min="0" max="1" step="0.05" value="0.8"
+               style="width:80px;accent-color:var(--gold);cursor:pointer">
+      </div>
+    </div>
+  </div>
+  <div class="two-col">
+    <div id="stage"></div>
+    <div class="card" id="standingsCard">
+      <div class="eyebrow" style="color:var(--gold);margin-bottom:12px">Scores</div>
+      <div id="standings"><div class="muted">Personne pour l'instant…</div></div>
+    </div>
+  </div>
+</div>
+<audio id="au"></audio>
+
+<script>
+const socket = io();
+const COLORS = ["#ff3d7f","#ffc247","#34e0c4","#7c8cff","#ff8a3d","#c47cff","#3ddc97","#ff5d5d"];
+const $ = s=>document.querySelector(s);
+const stage = $("#stage");
+const au = $("#au");
+
+let roomCode=null, players=[], tracks=[], trackIdx=0, roundIndex=0, total=0;
+let currentPhase="lobby";
+let roundStatusMap={};
+let timerInterval=null, revealTimeout=null, nextTimeout=null;
+
+const GUESS_SECS = 20;
+const REVEAL_SECS = 5;
+
+const esc = s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const colorOf = id=>{ const i=players.findIndex(p=>p.id===id); return COLORS[(i<0?0:i)%COLORS.length]; };
+const initial = n=>(n||"?").trim().charAt(0).toUpperCase();
+function av(name,color,size=38){ return `<div class="av" style="width:${size}px;height:${size}px;background:${color};font-size:${size*0.42}px">${initial(name)}</div>`; }
+
+function clearTimers(){ clearInterval(timerInterval); clearTimeout(revealTimeout); clearTimeout(nextTimeout); timerInterval=null; revealTimeout=null; nextTimeout=null; }
+
+// Volume
+au.volume = 0.8;
+const volSlider = document.getElementById("volSlider");
+const volIcon = document.getElementById("volIcon");
+volSlider.oninput = () => {
+  au.volume = parseFloat(volSlider.value);
+  volIcon.textContent = au.volume === 0 ? "🔇" : au.volume < 0.4 ? "🔉" : "🔊";
+};
+
+socket.emit("host:create",res=>{ roomCode=res.code; renderLobby(); });
+
+socket.on("lobby",r=>{ players=r; if(currentPhase==="lobby") renderLobby(); });
+socket.on("scoreboard",sb=>renderStandings(sb));
+socket.on("round:tracks",d=>{ tracks=d.tracks; roundIndex=d.roundIndex; total=d.total; trackIdx=0; roundStatusMap={}; renderStandings([]); startTrack(0); });
+socket.on("roundStatus",rs=>{ roundStatusMap={}; rs.forEach(p=>roundStatusMap[p.id]=p); updateStatusUI(rs); renderStandings(rs.slice().sort((a,b)=>b.score-a.score)); });
+socket.on("vote:progress",d=>{ const el=$("#voteProg"); if(el) el.textContent=`${d.voted} / ${d.total} ont voté`; });
+socket.on("reveal:data",d=>renderReveal(d));
+socket.on("host:done",sb=>renderDone(sb));
+socket.on("guess",g=>{ updateStatusUI(Object.values(roundStatusMap)); });
+
+/* ---- LOBBY ---- */
+function renderLobby(){
+  currentPhase="lobby";
+  $("#roundTag").textContent="Salon ouvert";
+  const ready=players.filter(p=>p.hasPlaylist).length;
+  const joinUrl=location.origin+"/play.html?room="+roomCode;
+  stage.innerHTML=`
+    <div class="card">
+      <div style="display:grid;grid-template-columns:1fr 210px;align-items:center;gap:16px">
+        <div>
+          <div class="eyebrow" style="color:var(--magenta)">Rejoindre la partie</div>
+          <div class="muted" style="margin:6px 0 4px">Scanne le QR ou va sur</div>
+          <div style="font-size:15px">${location.host}/play.html</div>
+          <div style="margin-top:10px" class="muted">et entre le code</div>
+          <div class="code">${roomCode}</div>
+        </div>
+        <div style="background:#fff;padding:10px;border-radius:14px;width:210px;height:210px" id="qr"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:18px">
+      <div class="eyebrow" style="color:var(--gold);margin-bottom:12px">Joueurs (${players.length}) · ${ready} playlist${ready>1?"s":""} prête${ready>1?"s":""}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${players.length?players.map(p=>`
+          <div class="row" style="background:var(--panel2);border-radius:11px;padding:9px 11px">
+            ${av(p.name,colorOf(p.id),30)}
+            <span style="font-weight:700">${esc(p.name)}</span>
+            <span style="margin-left:auto" class="${p.hasPlaylist?"":"muted"}">${p.hasPlaylist?"✓":"…"}</span>
+          </div>`).join(""):`<div class="muted" style="grid-column:1/-1">En attente des téléphones…</div>`}
+      </div>
+      <div class="row" style="margin-top:16px;gap:10px">
+        <button class="btn ghost" id="addBot" style="flex:none">🤖 Ajouter un bot</button>
+        <button class="btn" id="start" style="flex:1" ${ready<2?"disabled":""}>Lancer la partie</button>
+      </div>
+      <div id="botStatus"></div>
+      ${ready<2?`<div class="muted" style="font-size:13px;margin-top:8px">2 playlists minimum pour démarrer.</div>`:""}
+    </div>`;
+  const qr=$("#qr"); qr.innerHTML="";
+  new QRCode(qr,{text:joinUrl,width:190,height:190,colorDark:"#17111f",colorLight:"#ffffff"});
+  $("#start").onclick=()=>socket.emit("host:startGame",null,r=>{ if(r&&!r.ok) alert(r.error); });
+  const addBot=$("#addBot"),botStatus=$("#botStatus");
+  addBot.onclick=()=>{
+    addBot.disabled=true; addBot.textContent="⏳ Chargement…"; botStatus.innerHTML="";
+    socket.emit("host:addBot",null,r=>{
+      addBot.disabled=false; addBot.textContent="🤖 Ajouter un bot";
+      if(!r||!r.ok){ botStatus.innerHTML=`<div class="muted" style="font-size:13px;margin-top:6px;color:var(--magenta)">${esc(r?.error||"Erreur bot")}</div>`; return; }
+      botStatus.innerHTML=`<div class="muted" style="font-size:13px;margin-top:6px">${esc(r.name)} ajouté (${r.count} morceaux) ✓</div>`;
+    });
+  };
+}
+
+/* ---- MANCHE : lancement auto ---- */
+function startTrack(idx){
+  currentPhase="round";
+  clearTimers();
+  trackIdx=idx;
+  const t=tracks[idx];
+  roundStatusMap={};
+  $("#roundTag").textContent=`Morceau ${idx+1}/${tracks.length}`;
+
+  // Signal aux joueurs
+  socket.emit("host:playTrack",{track:t});
+
+  // Lancer l'audio
+  au.src=t.previewUrl;
+  au.play().catch(()=>{});
+
+  // UI : countdown + artwork caché
+  renderTrackUI(t, true);
+
+  // Décompte 15s
+  let remaining=GUESS_SECS;
+  updateCountdown(remaining);
+  timerInterval=setInterval(()=>{
+    remaining--;
+    updateCountdown(remaining);
+    if(remaining<=0){ clearInterval(timerInterval); timerInterval=null; }
+  },1000);
+
+  // Après 15s : révéler
+  revealTimeout=setTimeout(()=>revealTrack(t, idx), GUESS_SECS*1000);
+}
+
+function revealTrack(t, idx){
+  clearTimers();
+  au.pause();
+  socket.emit("host:trackReveal",{track:t});
+  renderTrackUI(t, false);
+  const lastTrack=idx>=tracks.length-1;
+  nextTimeout=setTimeout(()=>{
+    if(lastTrack){ socket.emit("host:startVote"); renderVoteWait(); }
+    else startTrack(idx+1);
+  }, REVEAL_SECS*1000);
+}
+
+function updateCountdown(n){
+  const el=$("#countdown"); if(el) el.textContent=n;
+  const bar=$("#barInner"); if(bar) bar.style.transform=`scaleX(${Math.max(0,n)/GUESS_SECS})`;
+  if(el) el.style.color=n<=5?"var(--magenta)":"var(--gold)";
+}
+
+function renderTrackUI(t, hidden){
+  stage.innerHTML=`
+    <div class="card" style="text-align:center">
+      <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:16px">
+        <div class="pill">👻 <b>?????</b></div>
+        <div class="pill" style="color:var(--gold)">Morceau ${trackIdx+1}/${tracks.length}</div>
+      </div>
+      ${hidden?`
+        <div class="art">❓</div>
+        <div class="countdown" id="countdown" style="margin:18px 0">${GUESS_SECS}</div>
+        <div class="bar-wrap"><span class="bar-inner" id="barInner"></span></div>
+        <div class="muted" style="font-size:14px">Les joueurs devinent sur leur téléphone…</div>
+      `:`
+        <div class="art">${t.artwork?`<img src="${esc(t.artwork)}" alt="">`:"🎵"}</div>
+        <div style="font-size:24px;font-weight:900;margin-top:14px">${esc(t.title)}</div>
+        <div style="color:var(--gold);font-size:16px;margin-top:4px">${esc(t.artist)}</div>
+        <div class="muted" style="font-size:13px;margin-top:10px">Prochain morceau dans ${REVEAL_SECS}s…</div>
+      `}
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="eyebrow" style="color:var(--gold);margin-bottom:10px">Joueurs</div>
+      <div id="playerStatus">
+        ${players.map(p=>{
+          const s=roundStatusMap[p.id]||{};
+          const dot=s.titleFound&&s.artistFound?"dot-both":s.titleFound||s.artistFound?"dot-partial":"dot-none";
+          return `<div class="row srow" id="ps-${p.id}">
+            <div class="status-dot ${dot}"></div>
+            ${av(p.name,colorOf(p.id),28)}
+            <span style="font-weight:600">${esc(p.name)}</span>
+            <span style="font-size:12px;margin-left:4px">
+              ${s.titleFound?'<span style="color:var(--teal)">🎵</span>':''}${s.artistFound?'<span style="color:var(--teal)">🎤</span>':''}
+            </span>
+            <b>${s.score??p.score??0}</b>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>`;
+}
+
+function updateStatusUI(rs){
+  rs.forEach(p=>{
+    const row=document.getElementById("ps-"+p.id); if(!row) return;
+    const dot=row.querySelector(".status-dot");
+    if(dot) dot.className="status-dot "+(p.titleFound&&p.artistFound?"dot-both":p.titleFound||p.artistFound?"dot-partial":"dot-none");
+    const scoreEl=row.querySelector("b"); if(scoreEl) scoreEl.textContent=p.score;
+    const icons=row.querySelectorAll("span")[1];
+    if(icons) icons.innerHTML=(p.titleFound?'<span style="color:var(--teal)">🎵</span>':'')+(p.artistFound?'<span style="color:var(--teal)">🎤</span>':'');
+  });
+}
+
+/* ---- VOTE ---- */
+function renderVoteWait(){
+  currentPhase="vote";
+  clearTimers();
+  $("#roundTag").textContent="Vote";
+  stage.innerHTML=`
+    <div class="card" style="text-align:center;padding:44px 24px">
+      <div style="font-size:46px">👻</div>
+      <div class="eyebrow" style="color:var(--magenta);margin-top:8px">Vote secret en cours</div>
+      <h1 style="font-size:28px;margin:10px 0">À qui appartient cette playlist&nbsp;?</h1>
+      <p class="muted">Chacun vote depuis son téléphone.</p>
+      <div id="voteProg" style="font-size:20px;font-weight:800;margin:12px 0 22px">0 / 0 ont voté</div>
+      <button class="btn" id="reveal" style="width:260px">Révéler l'imposteur</button>
+    </div>`;
+  $("#reveal").onclick=()=>socket.emit("host:reveal");
+}
+
+/* ---- RÉVÉLATION ---- */
+function renderReveal(d){
+  currentPhase="reveal";
+  $("#roundTag").textContent="Révélation";
+  const last=roundIndex>=total-1;
+  const resultColor = d.impostorWon ? "var(--magenta)" : "var(--teal)";
+  const resultEmoji = d.impostorWon ? "👻" : "🕵️";
+  const resultTitle = d.impostorWon ? "L'imposteur a gagné !" : "Les crewmates ont gagné !";
+  const resultSub = d.impostorWon
+    ? `${esc(d.ownerName)} a bien caché son jeu — la majorité n'a pas voté contre lui·elle.`
+    : `${esc(d.ownerName)} a été démasqué·e par la majorité !`;
+  stage.innerHTML=`
+    <div class="card" style="text-align:center">
+      <div style="font-size:52px;margin-bottom:6px">${resultEmoji}</div>
+      <div style="font-size:26px;font-weight:900;color:${resultColor};margin-bottom:4px">${resultTitle}</div>
+      <div class="muted" style="margin-bottom:16px">${resultSub}</div>
+      <div class="row" style="justify-content:center;gap:10px;margin-bottom:16px">
+        ${av(d.ownerName,"#ffc247",46)}<div style="text-align:left"><div class="eyebrow">La playlist était à</div><div style="font-size:20px;font-weight:900">${esc(d.ownerName)}</div></div>
+      </div>
+      <div style="text-align:left;display:flex;flex-direction:column;gap:5px;max-width:440px;margin:0 auto 16px">
+        ${d.votes.map(v=>`<div style="display:flex;align-items:center;gap:8px;background:var(--panel2);border-radius:9px;padding:8px 12px;font-size:14px">
+          <b>${esc(v.voter||"?")}</b> → <span class="muted">${esc(v.suspect||"?")}</span>
+          <span style="margin-left:auto;color:${v.correct?"var(--teal)":"var(--muted)"}">${v.correct?"✓ +2":"raté"}</span>
+        </div>`).join("")}
+      </div>
+      <button class="btn gold" id="next" style="width:100%">${last?"Résultats finaux":"Manche suivante"}</button>
+    </div>`;
+  $("#next").onclick=()=>socket.emit("host:nextRound");
+}
+
+/* ---- FIN ---- */
+function renderDone(sb){
+  currentPhase="done";
+  clearTimers();
+  $("#roundTag").textContent="Terminé";
+  const w=sb[0]||{name:"—",score:0};
+  stage.innerHTML=`
+    <div class="card" style="text-align:center;padding:48px 24px">
+      <div style="font-size:50px">👑</div>
+      <div class="eyebrow" style="color:var(--gold)">Vainqueur de la soirée</div>
+      <div class="row" style="justify-content:center;gap:12px;margin:12px 0">
+        ${av(w.name,"#ffc247",60)}<span style="font-size:38px;font-weight:900">${esc(w.name)}</span>
+      </div>
+      <div style="color:var(--gold);font-family:ui-monospace,monospace;font-size:18px">${w.score} points</div>
+      <div class="row" style="justify-content:center;gap:10px;margin-top:22px">
+        <button class="btn gold" id="replay">🔄 Rejouer</button>
+        <button class="btn ghost" onclick="location.reload()">Nouvelle partie</button>
+      </div>
+    </div>`;
+  renderStandings(sb);
+  $("#replay").onclick=()=>socket.emit("host:replay");
+}
+
+/* ---- SCORES ---- */
+function renderStandings(sb){
+  const el=$("#standings"); if(!el) return;
+  if(!sb||!sb.length){ el.innerHTML=`<div class="muted">Personne pour l'instant…</div>`; return; }
+  el.innerHTML=sb.map((p,i)=>`<div class="srow">
+    <span class="muted" style="width:18px;text-align:right;font-family:ui-monospace,monospace;font-size:12px">${i+1}</span>
+    ${av(p.name,colorOf(p.id),26)}<span style="font-weight:600">${esc(p.name)}</span><b>${p.score}</b>
+  </div>`).join("");
+}
+</script>
+</body>
+</html>
